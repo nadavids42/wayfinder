@@ -1,0 +1,98 @@
+# Wayfinder Career Configuration
+# Version: 1
+
+profile:
+  current_role: "Senior Strategic Consultant II"
+  current_company: "Bullhorn"
+
+  education:
+    - "BS Physics and Mathematics"
+    - "MS Data Analytics"
+
+  experience:
+    - "Enterprise SaaS implementation"
+    - "Technical solution architecture"
+    - "SQL and data analytics"
+    - "REST APIs and system integrations"
+    - "Workflow automation"
+    - "AI deployment and orchestration"
+    - "Technical consulting"
+
+  career_goal: >
+    Senior technical individual contributor role emphasizing
+    architecture, engineering, applied AI, autonomy,
+    and complex problem-solving.
+
+target_roles:
+  - "Principal Solutions Architect"
+  - "AI Deployment Lead"
+  - "Applied AI Engineer"
+  - "Forward Deployed Engineer"
+  - "Technical Delivery Architect"
+  - "Principal Technical Program Manager"
+  - "Staff Solutions Engineer"
+  - "AI Solutions Architect"
+
+compensation:
+  target_base_salary: 170000
+  currency: "USD"
+
+  # Salary is a preference, not an automatic disqualifier.
+  allow_below_target: true
+
+location:
+  preferred: "remote"
+
+  allow_hybrid: true
+  hybrid_locations:
+    - "Boston, MA"
+
+  allow_relocation: false
+
+travel:
+  preferred_max_percent: 10
+
+  # Higher travel may be acceptable for exceptional roles.
+  allow_exceptions: true
+
+work_preferences:
+  prefer:
+    - "Hands-on technical ownership"
+    - "Complex technical problem-solving"
+    - "AI systems engineering"
+    - "System architecture"
+    - "Autonomous technical decision-making"
+    - "Building and deploying production systems"
+    - "Substantial, technically challenging projects"
+
+  avoid:
+    - "Sales-heavy responsibilities"
+    - "Primarily people management"
+    - "Repetitive implementations"
+    - "Excessive client meetings"
+    - "High simultaneous project volume"
+    - "Low technical ownership"
+
+evaluation:
+  # Initial scoring weights.
+  # These are hypotheses we'll refine through feedback.
+  weights:
+    technical_fit: 0.35
+    compensation: 0.20
+    location: 0.15
+    travel: 0.10
+    career_potential: 0.20
+
+  # Opportunities below this score will not be recommended.
+  minimum_recommendation_score: 70
+
+constraints:
+  # Only objectively disqualifying conditions belong here.
+  hard:
+    relocation_required: false
+
+  # Preferences that may be overridden for exceptional roles.
+  soft:
+    minimum_base_salary: 170000
+    maximum_travel_percent: 10
+    remote_preferred: true
