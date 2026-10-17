@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
+class OpportunityIdentityError(Exception):
+    """Raised when opportunity identities conflict."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS opportunities (
@@ -30,6 +32,8 @@ CREATE TABLE IF NOT EXISTS opportunities (
     CHECK (salary_min IS NULL OR salary_max IS NULL OR salary_min <= salary_max)
 );
 CREATE INDEX IF NOT EXISTS idx_opportunities_status ON opportunities(status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_source_external_id ON opportunities(source, external_id) WHERE external_id IS NOT NULL;
 """
 
 
@@ -68,59 +72,217 @@ class OpportunityStore:
             connection.close()
 
     def initialize(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        """Initialize the database and apply identity migration."""
+
+        self.db_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         with self._connect() as connection:
             connection.executescript(SCHEMA)
 
+            duplicates = connection.execute(
+                """
+                SELECT
+                    source,
+                    external_id,
+                    COUNT(*) AS duplicate_count
+                FROM opportunities
+                WHERE external_id IS NOT NULL
+                GROUP BY source, external_id
+                HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+
+            if duplicates:
+                details = [
+                    (
+                        f"{row['source']}:{row['external_id']} "
+                        f"({row['duplicate_count']} records)"
+                    )
+                    for row in duplicates
+                ]
+
+                raise OpportunityIdentityError(
+                    "Duplicate opportunity identities require "
+                    "manual reconciliation: "
+                    + ", ".join(details)
+                )
+
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_opportunities_source_external_id
+                ON opportunities(source, external_id)
+                WHERE external_id IS NOT NULL
+                """
+            )
+
     def save(self, job: dict[str, Any]) -> int:
-        """Insert or refresh a posting; return its stable internal ID."""
-        required = ('source', 'company', 'title', 'description', 'url')
+        """Insert or refresh a posting, preserving its internal ID."""
+
+        required = ("source", "company", "title", "description", "url")
+
         for key in required:
             if not isinstance(job.get(key), str) or not job[key].strip():
-                raise ValueError(f'{key} must be a nonempty string')
-        remote_type = job.get('remote_type', 'unknown')
-        if remote_type not in ('remote', 'hybrid', 'onsite', 'unknown'):
-            raise ValueError('invalid remote_type')
-        for key in ('salary_min', 'salary_max'):
+                raise ValueError(f"{key} must be a nonempty string")
+
+        external_id = job.get("external_id")
+
+        if external_id is not None:
+            if not isinstance(external_id, str) or not external_id.strip():
+                raise ValueError("external_id must be a nonempty string or None")
+            external_id = external_id.strip()
+
+        remote_type = job.get("remote_type", "unknown")
+
+        if remote_type not in ("remote", "hybrid", "onsite", "unknown"):
+            raise ValueError("invalid remote_type")
+
+        for key in ("salary_min", "salary_max"):
             value = job.get(key)
             if value is not None and (type(value) is not int or value < 0):
-                raise ValueError(f'{key} must be a nonnegative integer or None')
-        low, high = job.get('salary_min'), job.get('salary_max')
+                raise ValueError(f"{key} must be a nonnegative integer or None")
+
+        low = job.get("salary_min")
+        high = job.get("salary_max")
+
         if low is not None and high is not None and low > high:
-            raise ValueError('salary_min cannot exceed salary_max')
-        url = normalize_url(job['url'])
+            raise ValueError("salary_min cannot exceed salary_max")
+
+        url = normalize_url(job["url"])
+        source = job["source"].strip()
         now = utc_now()
+
         with self._connect() as connection:
-            connection.execute(
-                """INSERT INTO opportunities (
-                    source, external_id, company, title, location, remote_type,
-                    salary_min, salary_max, currency, description, url,
-                    first_seen, last_seen
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    source=excluded.source,
-                    external_id=excluded.external_id,
-                    company=excluded.company,
-                    title=excluded.title,
-                    location=excluded.location,
-                    remote_type=excluded.remote_type,
-                    salary_min=excluded.salary_min,
-                    salary_max=excluded.salary_max,
-                    currency=excluded.currency,
-                    description=excluded.description,
-                    last_seen=excluded.last_seen
+            # Resolve identity and URL independently.
+            identity_row = None
+
+            if external_id is not None:
+                identity_row = connection.execute(
+                    """
+                    SELECT id
+                    FROM opportunities
+                    WHERE source = ? AND external_id = ?
+                    """,
+                    (source, external_id),
+                ).fetchone()
+
+            url_row = connection.execute(
+                """
+                SELECT id, source, external_id
+                FROM opportunities
+                WHERE url = ?
+                """,
+                (url,),
+            ).fetchone()
+
+            # Never merge two distinct records automatically.
+            if (
+                identity_row is not None
+                and url_row is not None
+                and identity_row["id"] != url_row["id"]
+            ):
+                raise OpportunityIdentityError(
+                    "Source identity and URL identify different opportunities"
+                )
+
+            if url_row is not None:
+                if url_row["source"] != source:
+                    raise OpportunityIdentityError(
+                        "URL already belongs to another source"
+                    )
+
+                existing_external_id = url_row["external_id"]
+
+                if (
+                    existing_external_id is not None
+                    and external_id is not None
+                    and existing_external_id != external_id
+                ):
+                    raise OpportunityIdentityError(
+                        "URL already belongs to another external ID"
+                    )
+
+            existing = identity_row or url_row
+
+            if existing is not None:
+                opportunity_id = int(existing["id"])
+
+                connection.execute(
+                    """
+                    UPDATE opportunities
+                    SET
+                        external_id = COALESCE(?, external_id),
+                        company = ?,
+                        title = ?,
+                        location = ?,
+                        remote_type = ?,
+                        salary_min = ?,
+                        salary_max = ?,
+                        currency = ?,
+                        description = ?,
+                        url = ?,
+                        last_seen = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        external_id,
+                        job["company"],
+                        job["title"],
+                        job.get("location"),
+                        remote_type,
+                        low,
+                        high,
+                        job.get("currency"),
+                        job["description"],
+                        url,
+                        now,
+                        opportunity_id,
+                    ),
+                )
+
+                return opportunity_id
+
+            cursor = connection.execute(
+                """
+                INSERT INTO opportunities (
+                    source,
+                    external_id,
+                    company,
+                    title,
+                    location,
+                    remote_type,
+                    salary_min,
+                    salary_max,
+                    currency,
+                    description,
+                    url,
+                    first_seen,
+                    last_seen
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    job['source'], job.get('external_id'), job['company'],
-                    job['title'], job.get('location'), remote_type, low, high,
-                    job.get('currency'), job['description'], url, now, now,
+                    source,
+                    external_id,
+                    job["company"],
+                    job["title"],
+                    job.get("location"),
+                    remote_type,
+                    low,
+                    high,
+                    job.get("currency"),
+                    job["description"],
+                    url,
+                    now,
+                    now,
                 ),
             )
-            row = connection.execute(
-                'SELECT id FROM opportunities WHERE url = ?', (url,)
-            ).fetchone()
-            assert row is not None
-            return int(row['id'])
+
+            assert cursor.lastrowid is not None
+            return int(cursor.lastrowid)
 
     def get(self, opportunity_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -134,3 +296,36 @@ class OpportunityStore:
             row = connection.execute('SELECT COUNT(*) AS n FROM opportunities').fetchone()
             assert row is not None
             return int(row['n'])
+
+    def get_by_identity(
+        self,
+        source: str,
+        external_id: str,
+    ) -> dict[str, Any] | None:
+        """Retrieve an opportunity by its source identity."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM opportunities
+                WHERE source = ?
+                AND external_id = ?
+                """,
+                (source, external_id),
+            ).fetchone()
+
+            return dict(row) if row is not None else None
+
+    def get_by_url(self, url: str) -> dict[str, Any] | None:
+        """Retrieve an opportunity by normalized URL."""
+
+        normalized = normalize_url(url)
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM opportunities WHERE url = ?",
+                (normalized,),
+            ).fetchone()
+
+            return dict(row) if row is not None else None
